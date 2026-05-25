@@ -1,0 +1,1 @@
+Remove-Item "$env:LOCALAPPDATA\SysAdminCheat" -Recurse -Force
