@@ -1,0 +1,812 @@
+--------------------------------------------------------
+МОДУЛЬ 1 — НАСТРОЙКА СЕТЕВОЙ ИНФРАСТРУКТУРЫ
+--------------------------------------------------------
+
+ТОПОЛОГИЯ:
+ISP
+HQ-RTR
+BR-RTR
+HQ-SRV
+BR-SRV
+HQ-CLI
+
+ДОМЕН:
+au-team.irpo
+
+--------------------------------------------------------
+0. БЫСТРАЯ ПРОВЕРКА ИНТЕРФЕЙСОВ
+--------------------------------------------------------
+
+ip a
+ip r
+
+Зачем:
+посмотреть имена сетевых интерфейсов и маршруты.
+
+--------------------------------------------------------
+1. ИМЕНА УСТРОЙСТВ
+--------------------------------------------------------
+
+HQ-RTR:
+hostnamectl set-hostname hq-rtr.au-team.irpo
+
+BR-RTR:
+hostnamectl set-hostname br-rtr.au-team.irpo
+
+HQ-SRV:
+hostnamectl set-hostname hq-srv.au-team.irpo
+
+BR-SRV:
+hostnamectl set-hostname br-srv.au-team.irpo
+
+HQ-CLI:
+hostnamectl set-hostname hq-cli.au-team.irpo
+
+Проверка:
+hostnamectl
+hostname -f
+
+Зачем:
+задать FQDN по заданию.
+
+--------------------------------------------------------
+2. IP-АДРЕСАЦИЯ
+--------------------------------------------------------
+
+СЕТИ:
+
+ISP-HQ:
+172.16.30.0/28
+
+ISP-BR:
+172.16.40.0/28
+
+VLAN112 HQ-SRV:
+192.168.112.0/27
+
+VLAN212 HQ-CLI:
+192.168.212.0/27
+
+VLAN812 MGMT:
+192.168.81.0/29
+
+BR-NET:
+192.168.50.0/28
+
+--------------------------------------------------------
+
+ISP:
+
+ip addr add 172.16.30.1/28 dev eth1
+ip addr add 172.16.40.1/28 dev eth2
+ip link set eth1 up
+ip link set eth2 up
+
+Интернет-интерфейс ISP:
+dhclient eth0
+
+--------------------------------------------------------
+
+HQ-RTR:
+
+ip addr add 172.16.30.2/28 dev eth0
+ip link set eth0 up
+ip route add default via 172.16.30.1
+
+--------------------------------------------------------
+
+BR-RTR:
+
+ip addr add 172.16.40.2/28 dev eth0
+ip addr add 192.168.50.1/28 dev eth1
+ip link set eth0 up
+ip link set eth1 up
+ip route add default via 172.16.40.1
+
+--------------------------------------------------------
+
+HQ-SRV:
+
+ip addr add 192.168.112.2/27 dev eth0
+ip link set eth0 up
+ip route add default via 192.168.112.1
+
+--------------------------------------------------------
+
+BR-SRV:
+
+ip addr add 192.168.50.2/28 dev eth0
+ip link set eth0 up
+ip route add default via 192.168.50.1
+
+--------------------------------------------------------
+
+Проверка:
+
+ip a
+ip r
+ping 172.16.30.1
+ping 172.16.40.1
+
+Зачем:
+назначить адреса и шлюзы.
+
+--------------------------------------------------------
+3. ВКЛЮЧИТЬ МАРШРУТИЗАЦИЮ
+--------------------------------------------------------
+
+На ISP, HQ-RTR, BR-RTR:
+
+nano /etc/sysctl.conf
+
+Добавить или раскомментировать:
+
+net.ipv4.ip_forward=1
+
+Применить:
+
+sysctl -p
+
+Проверка:
+
+sysctl net.ipv4.ip_forward
+
+Зачем:
+разрешить пересылку пакетов между сетями.
+
+--------------------------------------------------------
+4. NAT НА ISP
+--------------------------------------------------------
+
+На ISP:
+
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+Если надо разрешить forwarding:
+
+iptables -A FORWARD -j ACCEPT
+
+Сохранить:
+
+iptables-save > /etc/sysconfig/iptables
+
+Проверка:
+
+iptables -t nat -L -n -v
+
+Зачем:
+дать HQ-RTR и BR-RTR выход в Интернет через ISP.
+
+--------------------------------------------------------
+5. ПОЛЬЗОВАТЕЛИ НА СЕРВЕРАХ
+--------------------------------------------------------
+
+На HQ-SRV и BR-SRV:
+
+useradd -u 2012 sshuser
+passwd sshuser
+
+Пароль:
+P@ssw0rd
+
+sudo без пароля:
+
+visudo
+
+Добавить строку:
+
+sshuser ALL=(ALL) NOPASSWD:ALL
+
+Проверка:
+
+id sshuser
+su - sshuser
+sudo whoami
+
+Зачем:
+создать пользователя sshuser с UID 2012 и sudo.
+
+--------------------------------------------------------
+6. ПОЛЬЗОВАТЕЛИ НА МАРШРУТИЗАТОРАХ
+--------------------------------------------------------
+
+На HQ-RTR и BR-RTR:
+
+useradd net_admin
+passwd net_admin
+
+Пароль:
+P@ssw0rd
+
+sudo без пароля:
+
+visudo
+
+Добавить:
+
+net_admin ALL=(ALL) NOPASSWD:ALL
+
+Проверка:
+
+id net_admin
+su - net_admin
+sudo whoami
+
+Зачем:
+создать администратора маршрутизаторов.
+
+--------------------------------------------------------
+7. VLAN НА HQ-RTR
+--------------------------------------------------------
+
+На HQ-RTR, интерфейс в сторону HQ-SW — допустим eth1.
+
+VLAN112:
+
+ip link add link eth1 name eth1.112 type vlan id 112
+ip addr add 192.168.112.1/27 dev eth1.112
+ip link set eth1.112 up
+
+VLAN212:
+
+ip link add link eth1 name eth1.212 type vlan id 212
+ip addr add 192.168.212.1/27 dev eth1.212
+ip link set eth1.212 up
+
+VLAN812:
+
+ip link add link eth1 name eth1.812 type vlan id 812
+ip addr add 192.168.81.1/29 dev eth1.812
+ip link set eth1.812 up
+
+Проверка:
+
+ip a
+
+Зачем:
+router-on-a-stick для VLAN 112, 212, 812.
+
+--------------------------------------------------------
+8. VLAN НА КОММУТАТОРЕ HQ-SW
+--------------------------------------------------------
+
+Создать VLAN:
+
+vlan 112
+vlan 212
+vlan 812
+
+Порт к HQ-SRV:
+
+switchport mode access
+switchport access vlan 112
+
+Порт к HQ-CLI:
+
+switchport mode access
+switchport access vlan 212
+
+Порт к HQ-RTR:
+
+switchport mode trunk
+switchport trunk allowed vlan 112,212,812
+
+Зачем:
+разнести сервер, клиент и управление по VLAN.
+
+--------------------------------------------------------
+9. SSH НА HQ-SRV И BR-SRV
+--------------------------------------------------------
+
+На HQ-SRV и BR-SRV:
+
+nano /etc/ssh/sshd_config
+
+Поставить:
+
+Port 2012
+PermitRootLogin no
+AllowUsers sshuser
+MaxAuthTries 2
+Banner /etc/issue.net
+
+Баннер:
+
+nano /etc/issue.net
+
+Текст:
+
+Authorized access only
+
+Перезапуск:
+
+systemctl restart sshd
+
+Проверка:
+
+ss -tulpn | grep 2012
+ssh sshuser@192.168.112.2 -p 2012
+ssh sshuser@192.168.50.2 -p 2012
+
+Зачем:
+безопасный SSH по порту 2012 только для sshuser.
+
+--------------------------------------------------------
+10. GRE-ТУННЕЛЬ HQ-RTR <-> BR-RTR
+--------------------------------------------------------
+
+На HQ-RTR:
+
+ip tunnel add gre1 mode gre remote 172.16.40.2 local 172.16.30.2 ttl 255
+ip addr add 10.10.10.1/30 dev gre1
+ip link set gre1 up
+
+На BR-RTR:
+
+ip tunnel add gre1 mode gre remote 172.16.30.2 local 172.16.40.2 ttl 255
+ip addr add 10.10.10.2/30 dev gre1
+ip link set gre1 up
+
+Проверка:
+
+На HQ-RTR:
+ping 10.10.10.2
+
+На BR-RTR:
+ping 10.10.10.1
+
+Зачем:
+туннель между офисами HQ и BR.
+
+--------------------------------------------------------
+11. OSPF ЧЕРЕЗ ТУННЕЛЬ
+--------------------------------------------------------
+
+Установка FRR:
+
+apt install frr -y
+
+Включить ospfd:
+
+nano /etc/frr/daemons
+
+Поставить:
+
+ospfd=yes
+
+Перезапуск:
+
+systemctl restart frr
+
+Вход:
+
+vtysh
+
+--------------------------------------------------------
+
+HQ-RTR:
+
+conf t
+router ospf
+network 10.10.10.0/30 area 0
+network 192.168.112.0/27 area 0
+network 192.168.212.0/27 area 0
+network 192.168.81.0/29 area 0
+exit
+
+interface gre1
+ip ospf authentication message-digest
+ip ospf message-digest-key 1 md5 P@ssw0rd
+exit
+
+write
+
+--------------------------------------------------------
+
+BR-RTR:
+
+conf t
+router ospf
+network 10.10.10.0/30 area 0
+network 192.168.50.0/28 area 0
+exit
+
+interface gre1
+ip ospf authentication message-digest
+ip ospf message-digest-key 1 md5 P@ssw0rd
+exit
+
+write
+
+--------------------------------------------------------
+
+Проверка:
+
+show ip ospf neighbor
+show ip route
+
+Зачем:
+динамическая маршрутизация между HQ и BR, защищённая паролем.
+
+--------------------------------------------------------
+12. NAT НА HQ-RTR И BR-RTR
+--------------------------------------------------------
+
+HQ-RTR:
+
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+iptables -A FORWARD -j ACCEPT
+iptables-save > /etc/sysconfig/iptables
+
+BR-RTR:
+
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+iptables -A FORWARD -j ACCEPT
+iptables-save > /etc/sysconfig/iptables
+
+Проверка:
+
+iptables -t nat -L -n -v
+
+Зачем:
+устройства офисов выходят в Интернет через свои маршрутизаторы.
+
+--------------------------------------------------------
+13. DHCP ДЛЯ HQ-CLI
+--------------------------------------------------------
+
+На HQ-RTR:
+
+apt install dhcp-server -y
+
+Конфиг:
+
+nano /etc/dhcp/dhcpd.conf
+
+Вставить:
+
+subnet 192.168.212.0 netmask 255.255.255.224 {
+  range 192.168.212.2 192.168.212.30;
+  option routers 192.168.212.1;
+  option domain-name-servers 192.168.112.2;
+  option domain-name "au-team.irpo";
+}
+
+Указать интерфейс DHCP, если нужно:
+
+nano /etc/sysconfig/dhcpd
+
+Пример:
+
+DHCPDARGS=eth1.212
+
+Запуск:
+
+systemctl enable --now dhcpd
+systemctl restart dhcpd
+
+На HQ-CLI:
+
+dhclient
+
+Проверка:
+
+ip a
+ip r
+cat /etc/resolv.conf
+
+Зачем:
+HQ-CLI получает адрес автоматически.
+
+--------------------------------------------------------
+14. DNS НА HQ-SRV
+--------------------------------------------------------
+
+На HQ-SRV:
+
+apt install bind bind-utils -y
+
+Основной конфиг:
+
+nano /etc/bind/options.conf
+
+Forwarders:
+
+forwarders {
+  77.88.8.7;
+  77.88.8.3;
+};
+
+--------------------------------------------------------
+
+Зона:
+
+nano /etc/bind/local.conf
+
+Добавить:
+
+zone "au-team.irpo" {
+  type master;
+  file "/etc/bind/zone/au-team.irpo";
+};
+
+zone "112.168.192.in-addr.arpa" {
+  type master;
+  file "/etc/bind/zone/112.168.192.rev";
+};
+
+zone "212.168.192.in-addr.arpa" {
+  type master;
+  file "/etc/bind/zone/212.168.192.rev";
+};
+
+zone "50.168.192.in-addr.arpa" {
+  type master;
+  file "/etc/bind/zone/50.168.192.rev";
+};
+
+--------------------------------------------------------
+
+Создать папку:
+
+mkdir -p /etc/bind/zone
+
+Файл прямой зоны:
+
+nano /etc/bind/zone/au-team.irpo
+
+Вставить:
+
+$TTL 86400
+@ IN SOA hq-srv.au-team.irpo. admin.au-team.irpo. (
+  2026010101
+  3600
+  1800
+  604800
+  86400 )
+
+@       IN NS hq-srv.au-team.irpo.
+
+hq-rtr  IN A 192.168.112.1
+br-rtr  IN A 192.168.50.1
+hq-srv  IN A 192.168.112.2
+hq-cli  IN A 192.168.212.2
+br-srv  IN A 192.168.50.2
+docker  IN A 172.16.30.1
+web     IN A 172.16.40.1
+
+--------------------------------------------------------
+
+Reverse для HQ-SRV:
+
+nano /etc/bind/zone/112.168.192.rev
+
+Вставить:
+
+$TTL 86400
+@ IN SOA hq-srv.au-team.irpo. admin.au-team.irpo. (
+  2026010101
+  3600
+  1800
+  604800
+  86400 )
+
+@ IN NS hq-srv.au-team.irpo.
+
+1 IN PTR hq-rtr.au-team.irpo.
+2 IN PTR hq-srv.au-team.irpo.
+
+--------------------------------------------------------
+
+Reverse для HQ-CLI:
+
+nano /etc/bind/zone/212.168.192.rev
+
+Вставить:
+
+$TTL 86400
+@ IN SOA hq-srv.au-team.irpo. admin.au-team.irpo. (
+  2026010101
+  3600
+  1800
+  604800
+  86400 )
+
+@ IN NS hq-srv.au-team.irpo.
+
+2 IN PTR hq-cli.au-team.irpo.
+
+--------------------------------------------------------
+
+Reverse для BR:
+
+nano /etc/bind/zone/50.168.192.rev
+
+Вставить:
+
+$TTL 86400
+@ IN SOA hq-srv.au-team.irpo. admin.au-team.irpo. (
+  2026010101
+  3600
+  1800
+  604800
+  86400 )
+
+@ IN NS hq-srv.au-team.irpo.
+
+2 IN PTR br-srv.au-team.irpo.
+
+--------------------------------------------------------
+
+Проверить конфиг:
+
+named-checkconf
+named-checkzone au-team.irpo /etc/bind/zone/au-team.irpo
+
+Запуск:
+
+systemctl enable --now bind
+systemctl restart bind
+
+Проверка:
+
+dig hq-srv.au-team.irpo @192.168.112.2
+dig -x 192.168.112.2 @192.168.112.2
+nslookup hq-srv.au-team.irpo 192.168.112.2
+
+Зачем:
+DNS-зона au-team.irpo и обратные PTR-записи.
+
+--------------------------------------------------------
+15. DNS НА КЛИЕНТАХ
+--------------------------------------------------------
+
+На HQ-CLI:
+
+nano /etc/resolv.conf
+
+Вставить:
+
+search au-team.irpo
+nameserver 192.168.112.2
+
+На HQ-SRV:
+
+nano /etc/resolv.conf
+
+Вставить:
+
+search au-team.irpo
+nameserver 127.0.0.1
+nameserver 77.88.8.7
+
+На BR-SRV:
+
+nano /etc/resolv.conf
+
+Вставить:
+
+search au-team.irpo
+nameserver 192.168.112.2
+
+Проверка:
+
+nslookup hq-rtr.au-team.irpo
+nslookup br-srv.au-team.irpo
+
+Зачем:
+клиенты используют HQ-SRV как DNS.
+
+--------------------------------------------------------
+16. TIMEZONE
+--------------------------------------------------------
+
+На всех устройствах кроме виртуального коммутатора:
+
+timedatectl list-timezones
+
+Пример для Москвы:
+
+timedatectl set-timezone Europe/Moscow
+
+Проверка:
+
+timedatectl
+
+Зачем:
+часовой пояс по месту экзамена.
+
+--------------------------------------------------------
+17. ФИНАЛЬНЫЕ ПРОВЕРКИ
+--------------------------------------------------------
+
+На HQ-CLI:
+
+ip a
+ip r
+ping 192.168.212.1
+ping 192.168.112.2
+ping 192.168.50.2
+ping 8.8.8.8
+nslookup hq-srv.au-team.irpo
+ssh sshuser@hq-srv.au-team.irpo -p 2012
+
+--------------------------------------------------------
+
+На HQ-SRV:
+
+ping 192.168.112.1
+ping 192.168.50.2
+ping 8.8.8.8
+nslookup br-srv.au-team.irpo
+
+--------------------------------------------------------
+
+На BR-SRV:
+
+ping 192.168.50.1
+ping 192.168.112.2
+ping 8.8.8.8
+nslookup hq-srv.au-team.irpo
+
+--------------------------------------------------------
+
+На HQ-RTR:
+
+ip a
+ip r
+ping 10.10.10.2
+vtysh
+show ip ospf neighbor
+show ip route
+
+--------------------------------------------------------
+
+На BR-RTR:
+
+ip a
+ip r
+ping 10.10.10.1
+vtysh
+show ip ospf neighbor
+show ip route
+
+--------------------------------------------------------
+18. ЧТО ВНОСИТЬ В ОТЧЁТ
+--------------------------------------------------------
+
+1. Таблица IP-адресов:
+HQ-RTR
+BR-RTR
+HQ-SRV
+HQ-CLI
+BR-SRV
+
+2. VLAN:
+VLAN112 = HQ-SRV
+VLAN212 = HQ-CLI
+VLAN812 = MGMT
+
+3. Туннель:
+GRE
+HQ-RTR 10.10.10.1/30
+BR-RTR 10.10.10.2/30
+
+4. OSPF:
+работает только через gre1
+аутентификация MD5
+пароль P@ssw0rd
+
+5. DHCP:
+сеть 192.168.212.0/27
+шлюз 192.168.212.1
+DNS 192.168.112.2
+domain au-team.irpo
+
+6. DNS:
+зона au-team.irpo
+A и PTR записи
+
+--------------------------------------------------------
+КОНЕЦ МОДУЛЯ 1
+--------------------------------------------------------
