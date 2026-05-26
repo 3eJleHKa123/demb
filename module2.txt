@@ -1,0 +1,2243 @@
+--------------------------------------------------------
+МОДУЛЬ 2 — ОРГАНИЗАЦИЯ СЕТЕВОГО АДМИНИСТРИРОВАНИЯ
+--------------------------------------------------------
+
+ФОРМАТ:
+- Команды рассчитаны на Linux / Альт / аналоги.
+- Имена интерфейсов, дисков и пакетов могут отличаться.
+- Перед вводом всегда проверять: ip a, lsblk, hostname, systemctl status.
+- Если команда не сработала из-за имени пакета — искать аналог через apt-cache search.
+
+ТОПОЛОГИЯ:
+ISP
+HQ-RTR
+BR-RTR
+HQ-SRV
+BR-SRV
+HQ-CLI
+
+ДОМЕН:
+au-team.irpo
+
+ОСНОВНЫЕ УЗЛЫ:
+BR-SRV = Samba DC + Docker + Ansible
+HQ-SRV = RAID5 + NFS + Apache/MariaDB + web app
+ISP = Chrony NTP server + Nginx reverse proxy + basic auth
+HQ-CLI = доменный клиент + NFS automount + браузер
+
+ПОЛЬЗОВАТЕЛИ/ПАРОЛИ:
+Administrator / P@ssw0rd
+sshuser / P@ssw0rd
+net_admin / P@ssw0rd
+web2 / P@ssw0rd
+test2 / P@ssw0rd
+Kozma / P@ssw0rd
+
+--------------------------------------------------------
+0. БЫСТРАЯ ДИАГНОСТИКА ПЕРЕД СТАРТОМ
+--------------------------------------------------------
+
+На каждом устройстве:
+
+hostnamectl
+hostname -f
+ip a
+ip r
+cat /etc/resolv.conf
+timedatectl
+
+Проверить связь:
+
+ping 8.8.8.8
+ping hq-srv.au-team.irpo
+ping br-srv.au-team.irpo
+ping hq-cli.au-team.irpo
+
+Если DNS не работает:
+
+nslookup hq-srv.au-team.irpo
+dig hq-srv.au-team.irpo
+
+Зачем:
+понять, что стенд живой, DNS работает, маршруты есть.
+
+--------------------------------------------------------
+1. SAMBA DC НА BR-SRV
+--------------------------------------------------------
+
+ЗАДАЧА:
+- Настроить контроллер домена Samba DC на BR-SRV.
+- Домен: au-team.irpo.
+- Ввести HQ-CLI в домен.
+- Создать пользователей hquser1-hquser5.
+- Создать группу hq.
+- Добавить пользователей в hq.
+- Разрешить группе hq вход на HQ-CLI.
+- Разрешить sudo только для cat, grep, id.
+
+--------------------------------------------------------
+1.1. ПОДГОТОВКА BR-SRV
+--------------------------------------------------------
+
+Проверить hostname:
+
+hostnamectl
+hostname -f
+
+Если нужно:
+
+hostnamectl set-hostname br-srv.au-team.irpo
+
+Проверить IP:
+
+ip a
+ip r
+
+Проверить DNS:
+
+cat /etc/resolv.conf
+
+Если BR-SRV сам будет DC/DNS, временно можно:
+
+nano /etc/resolv.conf
+
+Вставить:
+
+search au-team.irpo
+nameserver 127.0.0.1
+
+Проверить время:
+
+timedatectl
+
+Зачем:
+Samba DC чувствителен к hostname, DNS и времени.
+
+--------------------------------------------------------
+1.2. УСТАНОВКА SAMBA DC
+--------------------------------------------------------
+
+Пакеты могут называться по-разному. Пробовать:
+
+apt install samba samba-dc samba-client krb5-workstation bind-utils -y
+
+Если нет samba-dc:
+
+apt-cache search samba | grep -i dc
+apt-cache search krb5
+
+Остановить лишние службы, если есть:
+
+systemctl stop smb nmb winbind
+systemctl disable smb nmb winbind
+
+Проверка:
+
+samba -V
+
+Зачем:
+ставим Samba AD DC и инструменты Kerberos/DNS.
+
+--------------------------------------------------------
+1.3. УДАЛИТЬ СТАРЫЙ SAMBA-КОНФИГ, ЕСЛИ ЕСТЬ
+--------------------------------------------------------
+
+Сохранить старый конфиг:
+
+mkdir -p /root/samba-backup
+cp -a /etc/samba/smb.conf /root/samba-backup/smb.conf.bak 2>/dev/null
+
+Удалить старый конфиг:
+
+rm -f /etc/samba/smb.conf
+
+Зачем:
+чистый provision домена.
+
+--------------------------------------------------------
+1.4. СОЗДАНИЕ ДОМЕНА AU-TEAM.IRPO
+--------------------------------------------------------
+
+Provision:
+
+samba-tool domain provision --use-rfc2307 --realm=AU-TEAM.IRPO --domain=AU-TEAM --server-role=dc --dns-backend=SAMBA_INTERNAL --adminpass='P@ssw0rd'
+
+Если просит интерактивно:
+
+Realm:
+AU-TEAM.IRPO
+
+Domain:
+AU-TEAM
+
+Server Role:
+dc
+
+DNS backend:
+SAMBA_INTERNAL
+
+Administrator password:
+P@ssw0rd
+
+Зачем:
+создать AD-домен au-team.irpo.
+
+--------------------------------------------------------
+1.5. KERBEROS CONFIG
+--------------------------------------------------------
+
+Скопировать krb5.conf:
+
+cp /var/lib/samba/private/krb5.conf /etc/krb5.conf
+
+Проверить:
+
+cat /etc/krb5.conf
+
+Тест Kerberos:
+
+kinit Administrator
+klist
+
+Пароль:
+P@ssw0rd
+
+Зачем:
+Kerberos нужен для домена и входа клиентов.
+
+--------------------------------------------------------
+1.6. ЗАПУСК SAMBA AD DC
+--------------------------------------------------------
+
+Включить службу:
+
+systemctl enable --now samba
+
+Если служба называется иначе:
+
+systemctl enable --now samba-ad-dc
+
+Проверить:
+
+systemctl status samba
+systemctl status samba-ad-dc
+
+Порты:
+
+ss -tulpn | grep -E '53|88|389|445|464'
+
+Зачем:
+запустить контроллер домена.
+
+--------------------------------------------------------
+1.7. ПРОВЕРКА ДОМЕНА
+--------------------------------------------------------
+
+Проверка домена:
+
+samba-tool domain level show
+samba-tool domain info 127.0.0.1
+samba-tool user list
+
+DNS-проверка:
+
+host -t SRV _ldap._tcp.au-team.irpo 127.0.0.1
+host -t SRV _kerberos._udp.au-team.irpo 127.0.0.1
+host br-srv.au-team.irpo 127.0.0.1
+
+Kerberos:
+
+kinit Administrator
+klist
+
+Зачем:
+убедиться, что DC, DNS и Kerberos работают.
+
+--------------------------------------------------------
+1.8. СОЗДАТЬ ПОЛЬЗОВАТЕЛЕЙ HQUSER1-HQUSER5
+--------------------------------------------------------
+
+Создать пользователей:
+
+samba-tool user create hquser1 'P@ssw0rd'
+samba-tool user create hquser2 'P@ssw0rd'
+samba-tool user create hquser3 'P@ssw0rd'
+samba-tool user create hquser4 'P@ssw0rd'
+samba-tool user create hquser5 'P@ssw0rd'
+
+Если пароль не принимает из-за политики:
+
+samba-tool domain passwordsettings set --complexity=off
+samba-tool domain passwordsettings set --min-pwd-length=6
+
+Потом снова создать пользователей.
+
+Проверка:
+
+samba-tool user list | grep hquser
+
+Зачем:
+пять пользователей офиса HQ.
+
+--------------------------------------------------------
+1.9. СОЗДАТЬ ГРУППУ HQ И ДОБАВИТЬ ПОЛЬЗОВАТЕЛЕЙ
+--------------------------------------------------------
+
+Создать группу:
+
+samba-tool group add hq
+
+Добавить пользователей:
+
+samba-tool group addmembers hq hquser1
+samba-tool group addmembers hq hquser2
+samba-tool group addmembers hq hquser3
+samba-tool group addmembers hq hquser4
+samba-tool group addmembers hq hquser5
+
+Проверка:
+
+samba-tool group listmembers hq
+
+Зачем:
+группа hq для прав входа и sudo.
+
+--------------------------------------------------------
+1.10. ВВЕСТИ HQ-CLI В ДОМЕН
+--------------------------------------------------------
+
+На HQ-CLI.
+
+Проверить hostname:
+
+hostnamectl
+hostname -f
+
+Если нужно:
+
+hostnamectl set-hostname hq-cli.au-team.irpo
+
+DNS должен смотреть на BR-SRV/DC:
+
+nano /etc/resolv.conf
+
+Пример:
+
+search au-team.irpo
+nameserver IP_BR_SRV
+
+Проверка DNS:
+
+host -t SRV _ldap._tcp.au-team.irpo
+host -t SRV _kerberos._udp.au-team.irpo
+ping br-srv.au-team.irpo
+
+Установить пакеты:
+
+apt install realmd sssd oddjob oddjob-mkhomedir adcli krb5-workstation samba-common-tools -y
+
+Если пакеты отличаются:
+
+apt-cache search realmd
+apt-cache search sssd
+apt-cache search adcli
+
+Найти домен:
+
+realm discover au-team.irpo
+
+Ввести в домен:
+
+realm join au-team.irpo -U Administrator
+
+Пароль:
+P@ssw0rd
+
+Проверка:
+
+realm list
+id 'AU-TEAM\hquser1'
+id hquser1@au-team.irpo
+
+Зачем:
+HQ-CLI становится клиентом домена.
+
+--------------------------------------------------------
+1.11. РАЗРЕШИТЬ ГРУППЕ HQ ВХОД НА HQ-CLI
+--------------------------------------------------------
+
+На HQ-CLI:
+
+realm permit -g hq
+
+Если команда не сработала:
+
+realm permit 'AU-TEAM\hq'
+
+Проверка:
+
+realm list
+
+Попробовать вход:
+
+su - hquser1@au-team.irpo
+
+Если домашняя папка не создаётся:
+
+systemctl enable --now oddjobd
+authconfig --enablemkhomedir --update
+
+Или вручную добавить PAM mkhomedir:
+
+nano /etc/pam.d/common-session
+
+Добавить:
+
+session required pam_mkhomedir.so skel=/etc/skel/ umask=0077
+
+Зачем:
+пользователи группы hq могут логиниться на HQ-CLI.
+
+--------------------------------------------------------
+1.12. SUDO ДЛЯ ГРУППЫ HQ ТОЛЬКО CAT, GREP, ID
+--------------------------------------------------------
+
+На HQ-CLI.
+
+Открыть sudoers:
+
+visudo
+
+Добавить:
+
+%hq ALL=(ALL) NOPASSWD: /bin/cat, /bin/grep, /usr/bin/id
+
+Если доменная группа видна с префиксом:
+
+%AU-TEAM\\hq ALL=(ALL) NOPASSWD: /bin/cat, /bin/grep, /usr/bin/id
+
+Если команды лежат в других путях:
+
+which cat
+which grep
+which id
+
+И заменить пути.
+
+Проверка:
+
+su - hquser1@au-team.irpo
+sudo cat /etc/hostname
+sudo grep root /etc/passwd
+sudo id
+sudo nano /etc/passwd
+
+Последняя команда должна быть запрещена.
+
+Зачем:
+ограниченное повышение привилегий только для cat, grep, id.
+
+--------------------------------------------------------
+2. RAID5 НА HQ-SRV
+--------------------------------------------------------
+
+ЗАДАЧА:
+- На HQ-SRV использовать 3 дополнительных диска по 1 ГБ.
+- Создать RAID5.
+- Имя устройства: md2.
+- Конфиг: /etc/mdadm.conf, если требуется.
+- Создать раздел.
+- Отформатировать ext4.
+- Автомонтирование в /raid.
+
+--------------------------------------------------------
+2.1. НАЙТИ ДИСКИ
+--------------------------------------------------------
+
+На HQ-SRV:
+
+lsblk
+fdisk -l
+blkid
+
+Пример дисков:
+
+/dev/sdb
+/dev/sdc
+/dev/sdd
+
+ВАЖНО:
+не перепутать с системным диском /dev/sda.
+
+Зачем:
+найти три дополнительных диска.
+
+--------------------------------------------------------
+2.2. ОЧИСТИТЬ СТАРЫЕ СИГНАТУРЫ
+--------------------------------------------------------
+
+Если диски точно нужные:
+
+wipefs -a /dev/sdb
+wipefs -a /dev/sdc
+wipefs -a /dev/sdd
+
+Если были старые RAID-метки:
+
+mdadm --zero-superblock /dev/sdb
+mdadm --zero-superblock /dev/sdc
+mdadm --zero-superblock /dev/sdd
+
+Зачем:
+чистый старт RAID.
+
+--------------------------------------------------------
+2.3. УСТАНОВИТЬ MDADM
+--------------------------------------------------------
+
+apt install mdadm -y
+
+Проверка:
+
+mdadm --version
+
+--------------------------------------------------------
+2.4. СОЗДАТЬ RAID5 MD2
+--------------------------------------------------------
+
+Создать массив:
+
+mdadm --create /dev/md2 --level=5 --raid-devices=3 /dev/sdb /dev/sdc /dev/sdd
+
+Подтвердить:
+yes
+
+Проверка:
+
+cat /proc/mdstat
+mdadm --detail /dev/md2
+lsblk
+
+Зачем:
+RAID5 из трёх дисков.
+
+--------------------------------------------------------
+2.5. СОЗДАТЬ РАЗДЕЛ НА /DEV/MD2
+--------------------------------------------------------
+
+Открыть fdisk:
+
+fdisk /dev/md2
+
+Комбинации внутри fdisk:
+
+n
+p
+1
+Enter
+Enter
+w
+
+После выхода проверить:
+
+lsblk
+
+Должен быть:
+
+/dev/md2p1
+
+Если раздел не появился:
+
+partprobe /dev/md2
+lsblk
+
+Зачем:
+создать раздел на RAID.
+
+--------------------------------------------------------
+2.6. ФОРМАТИРОВАТЬ EXT4
+--------------------------------------------------------
+
+mkfs.ext4 /dev/md2p1
+
+Проверка:
+
+blkid /dev/md2p1
+
+Зачем:
+файловая система ext4.
+
+--------------------------------------------------------
+2.7. МОНТИРОВАНИЕ В /RAID
+--------------------------------------------------------
+
+Создать папку:
+
+mkdir -p /raid
+
+Получить UUID:
+
+blkid /dev/md2p1
+
+Открыть fstab:
+
+nano /etc/fstab
+
+Добавить строку:
+
+UUID=ВСТАВИТЬ_UUID /raid ext4 defaults 0 0
+
+Пример:
+
+UUID=11111111-2222-3333-4444-555555555555 /raid ext4 defaults 0 0
+
+Проверить:
+
+mount -a
+df -h
+lsblk
+
+Зачем:
+автоматическое монтирование /raid.
+
+--------------------------------------------------------
+2.8. СОХРАНИТЬ RAID-КОНФИГ
+--------------------------------------------------------
+
+Вариант 1:
+
+mdadm --detail --scan >> /etc/mdadm.conf
+
+Вариант 2, если путь другой:
+
+mdadm --detail --scan >> /etc/mdadm/mdadm.conf
+
+Проверка:
+
+cat /etc/mdadm.conf
+cat /etc/mdadm/mdadm.conf
+
+Обновить initramfs, если команда есть:
+
+update-initramfs -u
+
+Зачем:
+RAID поднимется после перезагрузки.
+
+--------------------------------------------------------
+3. NFS НА HQ-SRV И АВТОМОНТИРОВАНИЕ НА HQ-CLI
+--------------------------------------------------------
+
+ЗАДАЧА:
+- NFS-сервер на HQ-SRV.
+- Общая папка: /raid/nfs.
+- Доступ чтение/запись только для сети HQ-CLI.
+- HQ-CLI автомонтирует в /mnt/nfs.
+
+Сеть HQ-CLI из модуля 1:
+192.168.212.0/27
+
+--------------------------------------------------------
+3.1. NFS SERVER НА HQ-SRV
+--------------------------------------------------------
+
+Установить:
+
+apt install nfs-server -y
+
+Если пакет не найден:
+
+apt-cache search nfs | grep server
+
+Создать папку:
+
+mkdir -p /raid/nfs
+
+Права:
+
+chmod 777 /raid/nfs
+
+Открыть exports:
+
+nano /etc/exports
+
+Добавить:
+
+/raid/nfs 192.168.212.0/27(rw,sync,no_subtree_check,no_root_squash)
+
+Применить:
+
+exportfs -ra
+
+Запустить:
+
+systemctl enable --now nfs-server
+
+Проверка:
+
+exportfs -v
+systemctl status nfs-server
+
+Зачем:
+NFS-доступ для сети HQ-CLI.
+
+--------------------------------------------------------
+3.2. NFS CLIENT НА HQ-CLI
+--------------------------------------------------------
+
+Установить:
+
+apt install nfs-utils autofs -y
+
+Если пакет не найден:
+
+apt-cache search nfs
+apt-cache search autofs
+
+Создать точку:
+
+mkdir -p /mnt/nfs
+
+Проверить экспорт:
+
+showmount -e hq-srv.au-team.irpo
+showmount -e 192.168.112.2
+
+--------------------------------------------------------
+3.3. ВАРИАНТ 1 — ПРОСТОЕ АВТОМОНТИРОВАНИЕ ЧЕРЕЗ FSTAB
+--------------------------------------------------------
+
+На HQ-CLI:
+
+nano /etc/fstab
+
+Добавить:
+
+192.168.112.2:/raid/nfs /mnt/nfs nfs defaults,_netdev 0 0
+
+Применить:
+
+mount -a
+
+Проверка:
+
+df -h
+mount | grep nfs
+touch /mnt/nfs/test.txt
+ls -l /mnt/nfs
+
+Зачем:
+NFS автоматически монтируется при загрузке.
+
+--------------------------------------------------------
+3.4. ВАРИАНТ 2 — AUTOFS
+--------------------------------------------------------
+
+На HQ-CLI:
+
+nano /etc/auto.master
+
+Добавить:
+
+/mnt /etc/auto.nfs --timeout=60
+
+Создать карту:
+
+nano /etc/auto.nfs
+
+Добавить:
+
+nfs -rw,sync 192.168.112.2:/raid/nfs
+
+Запустить:
+
+systemctl enable --now autofs
+systemctl restart autofs
+
+Проверка:
+
+ls /mnt/nfs
+touch /mnt/nfs/test_autofs.txt
+ls -l /mnt/nfs
+
+Зачем:
+автомонтирование по требованию.
+
+--------------------------------------------------------
+4. CHRONY NTP НА ISP
+--------------------------------------------------------
+
+ЗАДАЧА:
+- На ISP настроить chrony.
+- Вышестоящий NTP сервер — любой.
+- Stratum = 7.
+- Клиенты: HQ-SRV, HQ-CLI, BR-RTR, BR-SRV.
+
+--------------------------------------------------------
+4.1. УСТАНОВКА CHRONY НА ISP
+--------------------------------------------------------
+
+На ISP:
+
+apt install chrony -y
+
+Проверка:
+
+chronyd -v
+systemctl status chronyd
+systemctl status chrony
+
+--------------------------------------------------------
+4.2. КОНФИГ CHRONY НА ISP
+--------------------------------------------------------
+
+Открыть конфиг:
+
+nano /etc/chrony.conf
+
+Или:
+
+nano /etc/chrony/chrony.conf
+
+Пример конфига:
+
+server 0.pool.ntp.org iburst
+server 1.pool.ntp.org iburst
+
+allow 192.168.0.0/16
+allow 172.16.0.0/12
+
+local stratum 7
+
+Перезапуск:
+
+systemctl enable --now chronyd
+systemctl restart chronyd
+
+Если служба называется chrony:
+
+systemctl enable --now chrony
+systemctl restart chrony
+
+Проверка:
+
+chronyc sources
+chronyc tracking
+ss -ulpn | grep 123
+
+Зачем:
+ISP становится NTP-сервером со stratum 7.
+
+--------------------------------------------------------
+4.3. НАСТРОИТЬ КЛИЕНТОВ NTP
+--------------------------------------------------------
+
+На HQ-SRV, HQ-CLI, BR-RTR, BR-SRV:
+
+apt install chrony -y
+
+Открыть конфиг:
+
+nano /etc/chrony.conf
+
+Или:
+
+nano /etc/chrony/chrony.conf
+
+Указать ISP:
+
+server IP_ISP iburst
+
+Пример, если ISP в сторону HQ:
+server 172.16.30.1 iburst
+
+Пример, если устройство BR:
+server 172.16.40.1 iburst
+
+Перезапуск:
+
+systemctl enable --now chronyd
+systemctl restart chronyd
+
+Проверка:
+
+chronyc sources
+chronyc tracking
+timedatectl
+
+Зачем:
+все устройства синхронизируют время с ISP.
+
+--------------------------------------------------------
+5. ANSIBLE НА BR-SRV
+--------------------------------------------------------
+
+ЗАДАЧА:
+- Ansible на BR-SRV.
+- Рабочий каталог: /etc/ansible.
+- Inventory содержит:
+  HQ-SRV
+  HQ-CLI
+  HQ-RTR
+  BR-RTR
+- Все должны отвечать pong на ansible ping.
+
+--------------------------------------------------------
+5.1. УСТАНОВИТЬ ANSIBLE
+--------------------------------------------------------
+
+На BR-SRV:
+
+apt install ansible -y
+
+Проверка:
+
+ansible --version
+
+Создать каталог:
+
+mkdir -p /etc/ansible
+
+--------------------------------------------------------
+5.2. SSH-ДОСТУП ДО ХОСТОВ
+--------------------------------------------------------
+
+Проверить руками:
+
+ssh sshuser@hq-srv.au-team.irpo -p 2012
+ssh sshuser@hq-cli.au-team.irpo
+ssh net_admin@hq-rtr.au-team.irpo
+ssh net_admin@br-rtr.au-team.irpo
+
+Если SSH порт на серверах 2012, в inventory это нужно указать.
+
+Создать ключ:
+
+ssh-keygen
+
+Можно просто Enter Enter Enter.
+
+Скопировать ключи:
+
+ssh-copy-id -p 2012 sshuser@hq-srv.au-team.irpo
+ssh-copy-id sshuser@hq-cli.au-team.irpo
+ssh-copy-id net_admin@hq-rtr.au-team.irpo
+ssh-copy-id net_admin@br-rtr.au-team.irpo
+
+Если ssh-copy-id нет:
+
+cat ~/.ssh/id_rsa.pub
+
+На удалённом хосте:
+
+mkdir -p ~/.ssh
+nano ~/.ssh/authorized_keys
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/authorized_keys
+
+Зачем:
+Ansible должен подключаться без ошибок.
+
+--------------------------------------------------------
+5.3. INVENTORY
+--------------------------------------------------------
+
+Открыть:
+
+nano /etc/ansible/hosts
+
+Пример:
+
+[routers]
+hq-rtr.au-team.irpo ansible_user=net_admin
+br-rtr.au-team.irpo ansible_user=net_admin
+
+[servers]
+hq-srv.au-team.irpo ansible_user=sshuser ansible_port=2012
+
+[clients]
+hq-cli.au-team.irpo ansible_user=sshuser
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3
+ansible_become=true
+ansible_become_method=sudo
+
+Если HQ-CLI тоже ssh на 2012:
+
+hq-cli.au-team.irpo ansible_user=sshuser ansible_port=2012
+
+--------------------------------------------------------
+5.4. ПРОВЕРКА ANSIBLE PING
+--------------------------------------------------------
+
+Проверить:
+
+ansible all -m ping
+
+Если нужен пароль sudo:
+
+ansible all -m ping -K
+
+Ожидаемо:
+
+SUCCESS => {
+    "ping": "pong"
+}
+
+Если ошибка host key:
+
+ansible all -m ping -e 'ansible_ssh_common_args="-o StrictHostKeyChecking=no"'
+
+Или:
+
+export ANSIBLE_HOST_KEY_CHECKING=False
+ansible all -m ping
+
+Зачем:
+все узлы отвечают pong.
+
+--------------------------------------------------------
+6. DOCKER WEB APP НА BR-SRV
+--------------------------------------------------------
+
+ЗАДАЧА:
+- Развернуть стек контейнеров на BR-SRV.
+- Использовать образы site_latest и mariadb_latest из Additional.iso / docker.
+- Основной контейнер: site.
+- БД-контейнер: db.
+- БД: testdb2.
+- Пользователь: test2.
+- Пароль: P@ssw0rd.
+- Порт приложения: 8082.
+- Внешний доступ через 8082.
+
+--------------------------------------------------------
+6.1. ПОДКЛЮЧИТЬ ADDITIONAL.ISO
+--------------------------------------------------------
+
+На BR-SRV.
+
+Проверить диск:
+
+lsblk
+
+Создать папку:
+
+mkdir -p /mnt/additional
+
+Смонтировать ISO/CD:
+
+mount /dev/sr0 /mnt/additional
+
+Если другое устройство:
+
+mount /dev/cdrom /mnt/additional
+
+Проверка:
+
+ls /mnt/additional
+ls /mnt/additional/docker
+
+Зачем:
+найти образы site_latest и mariadb_latest.
+
+--------------------------------------------------------
+6.2. УСТАНОВИТЬ DOCKER
+--------------------------------------------------------
+
+apt install docker docker-compose -y
+
+Если compose отдельно:
+
+apt install docker-compose-plugin -y
+
+Проверка:
+
+docker --version
+docker compose version
+docker-compose --version
+
+Запуск:
+
+systemctl enable --now docker
+
+Проверка:
+
+systemctl status docker
+
+--------------------------------------------------------
+6.3. ИМПОРТ ОБРАЗОВ
+--------------------------------------------------------
+
+Перейти в директорию:
+
+cd /mnt/additional/docker
+
+Посмотреть файлы:
+
+ls -lh
+
+Возможные варианты импорта:
+
+docker load -i site_latest.tar
+docker load -i mariadb_latest.tar
+
+Если файлы .image:
+
+docker load -i site_latest
+docker load -i mariadb_latest
+
+Проверка:
+
+docker images
+
+Должны быть образы примерно:
+
+site_latest
+mariadb_latest
+
+Если имена с тегами странные:
+
+docker tag OLD_IMAGE_ID site_latest:latest
+docker tag OLD_IMAGE_ID mariadb_latest:latest
+
+Зачем:
+загрузить готовые образы из ISO.
+
+--------------------------------------------------------
+6.4. DOCKER COMPOSE YAML
+--------------------------------------------------------
+
+Создать каталог:
+
+mkdir -p /opt/testapp
+cd /opt/testapp
+
+Открыть файл:
+
+nano docker-compose.yml
+
+Вставить:
+
+version: "3.8"
+
+services:
+  db:
+    image: mariadb_latest
+    container_name: db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: P@ssw0rd
+      MYSQL_DATABASE: testdb2
+      MYSQL_USER: test2
+      MYSQL_PASSWORD: P@ssw0rd
+    volumes:
+      - db_data:/var/lib/mysql
+
+  site:
+    image: site_latest
+    container_name: site
+    restart: always
+    ports:
+      - "8082:8082"
+    environment:
+      DB_HOST: db
+      DB_NAME: testdb2
+      DB_USER: test2
+      DB_PASSWORD: P@ssw0rd
+      DB_PORT: 3306
+    depends_on:
+      - db
+
+volumes:
+  db_data:
+
+Если приложение внутри слушает 80, заменить порт:
+
+ports:
+  - "8082:80"
+
+Если приложение требует другие переменные — смотреть README/пример в ISO:
+
+ls /mnt/additional/docker
+cat /mnt/additional/docker/*
+
+--------------------------------------------------------
+6.5. ЗАПУСК DOCKER STACK
+--------------------------------------------------------
+
+Если новая команда:
+
+docker compose up -d
+
+Если старая:
+
+docker-compose up -d
+
+Проверка:
+
+docker ps
+docker logs site
+docker logs db
+ss -tulpn | grep 8082
+curl http://localhost:8082
+
+Зачем:
+контейнерное приложение доступно на 8082.
+
+--------------------------------------------------------
+7. WEB APP НА HQ-SRV: APACHE + MARIADB
+--------------------------------------------------------
+
+ЗАДАЧА:
+- На HQ-SRV развернуть web app.
+- Apache.
+- MariaDB.
+- Файлы web app и dump.sql из Additional.iso / web.
+- БД: webdb.
+- Пользователь: web2.
+- Пароль: P@ssw0rd.
+- index.php и images в каталог apache.
+- В index.php прописать подключение к БД.
+- Проверить приложение.
+
+--------------------------------------------------------
+7.1. ПОДКЛЮЧИТЬ ADDITIONAL.ISO
+--------------------------------------------------------
+
+На HQ-SRV:
+
+lsblk
+
+Создать папку:
+
+mkdir -p /mnt/additional
+
+Смонтировать:
+
+mount /dev/sr0 /mnt/additional
+
+Если иначе:
+
+mount /dev/cdrom /mnt/additional
+
+Проверка:
+
+ls /mnt/additional
+ls /mnt/additional/web
+
+Зачем:
+найти index.php, images, dump.sql.
+
+--------------------------------------------------------
+7.2. УСТАНОВИТЬ APACHE, PHP, MARIADB
+--------------------------------------------------------
+
+apt install apache2 mariadb-server php php-mysql -y
+
+Если apache называется httpd:
+
+apt install httpd mariadb-server php php-mysql -y
+
+Запуск:
+
+systemctl enable --now apache2
+systemctl enable --now mariadb
+
+Если httpd:
+
+systemctl enable --now httpd
+
+Проверка:
+
+systemctl status apache2
+systemctl status httpd
+systemctl status mariadb
+ss -tulpn | grep -E '80|3306'
+
+--------------------------------------------------------
+7.3. СОЗДАТЬ БД И ПОЛЬЗОВАТЕЛЯ
+--------------------------------------------------------
+
+Войти в MariaDB:
+
+mysql -u root
+
+Выполнить:
+
+CREATE DATABASE webdb;
+CREATE USER 'web2'@'localhost' IDENTIFIED BY 'P@ssw0rd';
+GRANT ALL PRIVILEGES ON webdb.* TO 'web2'@'localhost';
+FLUSH PRIVILEGES;
+EXIT;
+
+Если приложение подключается не localhost, а 127.0.0.1:
+
+mysql -u root
+
+CREATE USER 'web2'@'127.0.0.1' IDENTIFIED BY 'P@ssw0rd';
+GRANT ALL PRIVILEGES ON webdb.* TO 'web2'@'127.0.0.1';
+FLUSH PRIVILEGES;
+EXIT;
+
+Зачем:
+создать базу webdb и доступ web2.
+
+--------------------------------------------------------
+7.4. ИМПОРТ DUMP.SQL
+--------------------------------------------------------
+
+Найти dump:
+
+find /mnt/additional -name "dump.sql"
+
+Импорт:
+
+mysql -u root webdb < /mnt/additional/web/dump.sql
+
+Проверить таблицы:
+
+mysql -u root -e "USE webdb; SHOW TABLES;"
+
+Зачем:
+загрузить схему и данные приложения.
+
+--------------------------------------------------------
+7.5. СКОПИРОВАТЬ WEB-ФАЙЛЫ
+--------------------------------------------------------
+
+Найти DocumentRoot:
+
+grep -R "DocumentRoot" /etc/apache2 /etc/httpd 2>/dev/null
+
+Частые варианты:
+
+/var/www/html
+/var/www
+
+Скопировать:
+
+cp /mnt/additional/web/index.php /var/www/html/
+cp -r /mnt/additional/web/images /var/www/html/
+
+Права:
+
+chown -R apache:apache /var/www/html 2>/dev/null
+chown -R www-data:www-data /var/www/html 2>/dev/null
+chmod -R 755 /var/www/html
+
+Зачем:
+поместить приложение в каталог веб-сервера.
+
+--------------------------------------------------------
+7.6. НАСТРОИТЬ INDEX.PHP
+--------------------------------------------------------
+
+Открыть:
+
+nano /var/www/html/index.php
+
+Найти параметры БД:
+
+db
+database
+user
+password
+host
+
+Поставить:
+
+host = localhost
+database = webdb
+user = web2
+password = P@ssw0rd
+
+Если порт указан:
+
+port = 3306
+
+Проверка PHP:
+
+php -l /var/www/html/index.php
+
+Перезапуск:
+
+systemctl restart apache2
+systemctl restart httpd
+systemctl restart mariadb
+
+Проверка:
+
+curl http://localhost
+curl http://hq-srv.au-team.irpo
+
+Зачем:
+приложение подключается к MariaDB.
+
+--------------------------------------------------------
+8. СТАТИЧЕСКАЯ ТРАНСЛЯЦИЯ ПОРТОВ НА МАРШРУТИЗАТОРАХ
+--------------------------------------------------------
+
+ЗАДАЧА:
+- BR-RTR: пробросить 8082 на приложение BR-SRV.
+- HQ-RTR: пробросить 8082 на web app HQ-SRV.
+- HQ-RTR: пробросить 2012 на SSH HQ-SRV.
+- BR-RTR: пробросить 2026 на SSH BR-SRV.
+
+ВАЖНО:
+Команды ниже для iptables Linux-router.
+eth0 = внешний интерфейс в сторону ISP.
+Внутренние IP:
+HQ-SRV = 192.168.112.2
+BR-SRV = 192.168.50.2
+
+--------------------------------------------------------
+8.1. ВКЛЮЧИТЬ IP FORWARD
+--------------------------------------------------------
+
+На HQ-RTR и BR-RTR:
+
+nano /etc/sysctl.conf
+
+Добавить:
+
+net.ipv4.ip_forward=1
+
+Применить:
+
+sysctl -p
+
+Проверка:
+
+sysctl net.ipv4.ip_forward
+
+--------------------------------------------------------
+8.2. HQ-RTR PORT FORWARD
+--------------------------------------------------------
+
+На HQ-RTR.
+
+8082 внешне -> HQ-SRV web app port 80:
+
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 8082 -j DNAT --to-destination 192.168.112.2:80
+iptables -A FORWARD -p tcp -d 192.168.112.2 --dport 80 -j ACCEPT
+
+2012 внешне -> HQ-SRV ssh 2012:
+
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 2012 -j DNAT --to-destination 192.168.112.2:2012
+iptables -A FORWARD -p tcp -d 192.168.112.2 --dport 2012 -j ACCEPT
+
+NAT наружу, если нужно:
+
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+Сохранить:
+
+iptables-save > /etc/sysconfig/iptables
+
+Проверка:
+
+iptables -t nat -L -n -v
+iptables -L -n -v
+
+--------------------------------------------------------
+8.3. BR-RTR PORT FORWARD
+--------------------------------------------------------
+
+На BR-RTR.
+
+8082 внешне -> BR-SRV docker app 8082:
+
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 8082 -j DNAT --to-destination 192.168.50.2:8082
+iptables -A FORWARD -p tcp -d 192.168.50.2 --dport 8082 -j ACCEPT
+
+2026 внешне -> BR-SRV ssh 2026:
+
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 2026 -j DNAT --to-destination 192.168.50.2:2026
+iptables -A FORWARD -p tcp -d 192.168.50.2 --dport 2026 -j ACCEPT
+
+NAT наружу, если нужно:
+
+iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE
+
+Сохранить:
+
+iptables-save > /etc/sysconfig/iptables
+
+Проверка:
+
+iptables -t nat -L -n -v
+iptables -L -n -v
+
+--------------------------------------------------------
+8.4. ПРОВЕРКА ПРОБРОСОВ
+--------------------------------------------------------
+
+С ISP или внешней сети:
+
+curl http://IP_HQ_RTR:8082
+curl http://IP_BR_RTR:8082
+
+SSH:
+
+ssh sshuser@IP_HQ_RTR -p 2012
+ssh sshuser@IP_BR_RTR -p 2026
+
+Если BR-SRV SSH реально слушает 2012, а задание требует внешний 2026:
+DNAT 2026 -> 192.168.50.2:2012
+
+Команда:
+
+iptables -t nat -A PREROUTING -i eth0 -p tcp --dport 2026 -j DNAT --to-destination 192.168.50.2:2012
+
+Зачем:
+доступ к внутренним сервисам извне.
+
+--------------------------------------------------------
+9. NGINX REVERSE PROXY НА ISP
+--------------------------------------------------------
+
+ЗАДАЧА:
+- На ISP настроить nginx как обратный прокси.
+- web.au-team.irpo -> web app на HQ-SRV.
+- docker.au-team.irpo -> container app site на BR-SRV.
+
+ВАЖНО:
+По модулю 1 DNS:
+web.au-team.irpo = ISP интерфейс в сторону BR-RTR или внешний адрес
+docker.au-team.irpo = ISP интерфейс в сторону HQ-RTR или внешний адрес
+
+Главное:
+клиент должен открыть web.au-team.irpo и попасть на HQ-SRV.
+клиент должен открыть docker.au-team.irpo и попасть на BR-SRV docker app.
+
+--------------------------------------------------------
+9.1. УСТАНОВИТЬ NGINX НА ISP
+--------------------------------------------------------
+
+apt install nginx -y
+
+Запуск:
+
+systemctl enable --now nginx
+
+Проверка:
+
+systemctl status nginx
+ss -tulpn | grep 80
+curl http://localhost
+
+--------------------------------------------------------
+9.2. НАСТРОИТЬ SERVER BLOCKS
+--------------------------------------------------------
+
+Открыть конфиг:
+
+nano /etc/nginx/nginx.conf
+
+Или создать отдельный:
+
+mkdir -p /etc/nginx/conf.d
+nano /etc/nginx/conf.d/reverse.conf
+
+Вставить:
+
+server {
+    listen 80;
+    server_name web.au-team.irpo;
+
+    location / {
+        proxy_pass http://IP_HQ_RTR:8082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+server {
+    listen 80;
+    server_name docker.au-team.irpo;
+
+    location / {
+        proxy_pass http://IP_BR_RTR:8082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+Если ISP напрямую видит внутренние адреса через маршрутизацию, можно:
+
+proxy_pass http://192.168.112.2:80;
+proxy_pass http://192.168.50.2:8082;
+
+Но если по заданию сделан port forwarding на роутерах, лучше через IP_HQ_RTR:8082 и IP_BR_RTR:8082.
+
+--------------------------------------------------------
+9.3. ПРОВЕРКА NGINX
+--------------------------------------------------------
+
+Проверить конфиг:
+
+nginx -t
+
+Перезапуск:
+
+systemctl restart nginx
+
+Проверка с ISP:
+
+curl -H "Host: web.au-team.irpo" http://127.0.0.1
+curl -H "Host: docker.au-team.irpo" http://127.0.0.1
+
+Проверка с HQ-CLI:
+
+curl http://web.au-team.irpo
+curl http://docker.au-team.irpo
+
+Зачем:
+ISP проксирует запросы на нужные внутренние web apps.
+
+--------------------------------------------------------
+10. WEB-BASED АУТЕНТИФИКАЦИЯ НА ISP
+--------------------------------------------------------
+
+ЗАДАЧА:
+- При обращении к web.au-team.irpo запросить логин/пароль.
+- Логин: Kozma.
+- Пароль: P@ssw0rd.
+- Файл: /etc/nginx/.htpasswd.
+- После успешного входа открыть сайт.
+
+--------------------------------------------------------
+10.1. УСТАНОВИТЬ HTPASSWD
+--------------------------------------------------------
+
+На ISP.
+
+Вариант Apache tools:
+
+apt install apache2-utils -y
+
+Если пакет другой:
+
+apt install httpd-tools -y
+
+Проверка:
+
+which htpasswd
+
+--------------------------------------------------------
+10.2. СОЗДАТЬ /ETC/NGINX/.HTPASSWD
+--------------------------------------------------------
+
+Создать пользователя:
+
+htpasswd -c /etc/nginx/.htpasswd Kozma
+
+Пароль:
+P@ssw0rd
+
+Если нужно одной командой:
+
+htpasswd -bc /etc/nginx/.htpasswd Kozma 'P@ssw0rd'
+
+Проверка:
+
+cat /etc/nginx/.htpasswd
+
+Зачем:
+файл пользователей для basic auth.
+
+--------------------------------------------------------
+10.3. ДОБАВИТЬ AUTH В WEB.AU-TEAM.IRPO
+--------------------------------------------------------
+
+Открыть конфиг:
+
+nano /etc/nginx/conf.d/reverse.conf
+
+В server web.au-team.irpo добавить в location /:
+
+auth_basic "Restricted";
+auth_basic_user_file /etc/nginx/.htpasswd;
+
+Итоговый блок:
+
+server {
+    listen 80;
+    server_name web.au-team.irpo;
+
+    location / {
+        auth_basic "Restricted";
+        auth_basic_user_file /etc/nginx/.htpasswd;
+
+        proxy_pass http://IP_HQ_RTR:8082;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+}
+
+ВАЖНО:
+для docker.au-team.irpo basic auth не нужен, только для web.au-team.irpo.
+
+--------------------------------------------------------
+10.4. ПРОВЕРКА AUTH
+--------------------------------------------------------
+
+Проверка конфига:
+
+nginx -t
+
+Перезапуск:
+
+systemctl restart nginx
+
+Проверка без пароля:
+
+curl -I http://web.au-team.irpo
+
+Ожидаемо:
+
+401 Unauthorized
+
+Проверка с паролем:
+
+curl -u Kozma:'P@ssw0rd' http://web.au-team.irpo
+
+Проверка docker без auth:
+
+curl http://docker.au-team.irpo
+
+Зачем:
+web.au-team.irpo закрыт логином и паролем.
+
+--------------------------------------------------------
+11. ЯНДЕКС БРАУЗЕР НА HQ-CLI
+--------------------------------------------------------
+
+ЗАДАЧА:
+- Установить Яндекс Браузер на HQ-CLI.
+- Установку отметить в отчёте.
+
+--------------------------------------------------------
+11.1. ВАРИАНТ 1 — ИЗ ПАКЕТА .RPM/.DEB
+--------------------------------------------------------
+
+Если пакет есть на Additional.iso:
+
+ls /mnt/additional
+find /mnt/additional -iname "*yandex*"
+find /mnt/additional -iname "*browser*"
+
+Для RPM:
+
+rpm -i yandex-browser*.rpm
+
+Если зависимости:
+
+apt-get install -f -y
+
+Для DEB:
+
+dpkg -i yandex-browser*.deb
+apt-get install -f -y
+
+Проверка:
+
+yandex-browser --version
+which yandex-browser
+
+--------------------------------------------------------
+11.2. ВАРИАНТ 2 — ЧЕРЕЗ APT, ЕСЛИ РЕПОЗИТОРИЙ ДОСТУПЕН
+--------------------------------------------------------
+
+Поиск:
+
+apt-cache search yandex
+apt-cache search browser
+
+Установка:
+
+apt install yandex-browser-stable -y
+
+Проверка:
+
+yandex-browser --version
+
+--------------------------------------------------------
+11.3. ЗАПУСК И ПРОВЕРКА
+--------------------------------------------------------
+
+В графической среде HQ-CLI:
+
+Меню приложений -> Интернет -> Яндекс Браузер
+
+Или из терминала:
+
+yandex-browser
+
+Проверить сайты:
+
+http://web.au-team.irpo
+http://docker.au-team.irpo
+
+Для web.au-team.irpo:
+логин Kozma
+пароль P@ssw0rd
+
+Зачем:
+браузер установлен и может открыть веб-приложения.
+
+--------------------------------------------------------
+12. ФИНАЛЬНАЯ ПРОВЕРКА МОДУЛЯ 2
+--------------------------------------------------------
+
+--------------------------------------------------------
+12.1. SAMBA DC
+--------------------------------------------------------
+
+На BR-SRV:
+
+samba-tool domain info 127.0.0.1
+samba-tool user list | grep hquser
+samba-tool group listmembers hq
+host -t SRV _ldap._tcp.au-team.irpo 127.0.0.1
+kinit Administrator
+klist
+
+На HQ-CLI:
+
+realm list
+id hquser1@au-team.irpo
+su - hquser1@au-team.irpo
+sudo cat /etc/hostname
+sudo grep root /etc/passwd
+sudo id
+sudo nano /etc/passwd
+
+nano должен быть запрещён.
+
+--------------------------------------------------------
+12.2. RAID5
+--------------------------------------------------------
+
+На HQ-SRV:
+
+cat /proc/mdstat
+mdadm --detail /dev/md2
+lsblk
+df -h /raid
+cat /etc/fstab
+
+--------------------------------------------------------
+12.3. NFS
+--------------------------------------------------------
+
+На HQ-SRV:
+
+exportfs -v
+systemctl status nfs-server
+
+На HQ-CLI:
+
+showmount -e hq-srv.au-team.irpo
+mount | grep nfs
+df -h
+touch /mnt/nfs/check.txt
+ls -l /mnt/nfs
+
+--------------------------------------------------------
+12.4. CHRONY
+--------------------------------------------------------
+
+На ISP:
+
+chronyc tracking
+chronyc sources
+ss -ulpn | grep 123
+
+На клиентах:
+
+chronyc tracking
+chronyc sources
+timedatectl
+
+--------------------------------------------------------
+12.5. ANSIBLE
+--------------------------------------------------------
+
+На BR-SRV:
+
+cd /etc/ansible
+ansible all -m ping
+
+Ожидаемо:
+pong от HQ-SRV, HQ-CLI, HQ-RTR, BR-RTR.
+
+--------------------------------------------------------
+12.6. DOCKER APP
+--------------------------------------------------------
+
+На BR-SRV:
+
+docker ps
+docker images
+docker logs site
+docker logs db
+curl http://localhost:8082
+
+Снаружи:
+
+curl http://IP_BR_RTR:8082
+curl http://docker.au-team.irpo
+
+--------------------------------------------------------
+12.7. APACHE WEB APP
+--------------------------------------------------------
+
+На HQ-SRV:
+
+systemctl status apache2
+systemctl status httpd
+systemctl status mariadb
+mysql -u root -e "USE webdb; SHOW TABLES;"
+curl http://localhost
+
+Снаружи:
+
+curl http://IP_HQ_RTR:8082
+curl http://web.au-team.irpo
+
+С auth:
+
+curl -u Kozma:'P@ssw0rd' http://web.au-team.irpo
+
+--------------------------------------------------------
+12.8. PORT FORWARDING
+--------------------------------------------------------
+
+На HQ-RTR:
+
+iptables -t nat -L -n -v
+iptables -L -n -v
+
+На BR-RTR:
+
+iptables -t nat -L -n -v
+iptables -L -n -v
+
+С ISP:
+
+curl http://IP_HQ_RTR:8082
+curl http://IP_BR_RTR:8082
+ssh sshuser@IP_HQ_RTR -p 2012
+ssh sshuser@IP_BR_RTR -p 2026
+
+--------------------------------------------------------
+12.9. NGINX REVERSE PROXY
+--------------------------------------------------------
+
+На ISP:
+
+nginx -t
+systemctl status nginx
+curl -H "Host: web.au-team.irpo" http://127.0.0.1
+curl -H "Host: docker.au-team.irpo" http://127.0.0.1
+curl -u Kozma:'P@ssw0rd' http://web.au-team.irpo
+curl http://docker.au-team.irpo
+
+--------------------------------------------------------
+12.10. ЯНДЕКС БРАУЗЕР
+--------------------------------------------------------
+
+На HQ-CLI:
+
+yandex-browser --version
+
+Открыть:
+
+http://web.au-team.irpo
+http://docker.au-team.irpo
+
+--------------------------------------------------------
+13. ЧТО ВНОСИТЬ В ОТЧЁТ
+--------------------------------------------------------
+
+1. Samba DC:
+- BR-SRV = контроллер домена.
+- Домен = au-team.irpo.
+- Пользователи = hquser1-hquser5.
+- Группа = hq.
+- HQ-CLI введён в домен.
+- Группа hq может входить на HQ-CLI.
+- sudo разрешён только для cat, grep, id.
+
+Команды/скрины:
+samba-tool domain info 127.0.0.1
+samba-tool group listmembers hq
+realm list
+id hquser1@au-team.irpo
+
+--------------------------------------------------------
+
+2. RAID5:
+- Устройство = /dev/md2.
+- Уровень = RAID5.
+- Диски = /dev/sdb /dev/sdc /dev/sdd.
+- ФС = ext4.
+- Точка монтирования = /raid.
+- Автомонтирование через /etc/fstab.
+
+Команды/скрины:
+cat /proc/mdstat
+mdadm --detail /dev/md2
+lsblk
+df -h /raid
+cat /etc/fstab
+
+--------------------------------------------------------
+
+3. NFS:
+- Сервер = HQ-SRV.
+- Папка = /raid/nfs.
+- Доступ = rw только для сети HQ-CLI.
+- Клиент = HQ-CLI.
+- Монтирование = /mnt/nfs.
+
+Команды/скрины:
+exportfs -v
+showmount -e hq-srv.au-team.irpo
+mount | grep nfs
+touch /mnt/nfs/test.txt
+
+--------------------------------------------------------
+
+4. Chrony:
+- Сервер = ISP.
+- Stratum = 7.
+- Клиенты = HQ-SRV, HQ-CLI, BR-RTR, BR-SRV.
+
+Команды/скрины:
+chronyc tracking
+chronyc sources
+timedatectl
+
+--------------------------------------------------------
+
+5. Ansible:
+- Сервер управления = BR-SRV.
+- Каталог = /etc/ansible.
+- Inventory = HQ-SRV, HQ-CLI, HQ-RTR, BR-RTR.
+- Проверка = ansible all -m ping.
+
+Команды/скрины:
+cat /etc/ansible/hosts
+ansible all -m ping
+
+--------------------------------------------------------
+
+6. Docker app:
+- Сервер = BR-SRV.
+- Контейнер web = site.
+- Контейнер DB = db.
+- DB = testdb2.
+- User = test2.
+- Password = P@ssw0rd.
+- Port = 8082.
+- Compose file = /opt/testapp/docker-compose.yml.
+
+Команды/скрины:
+docker ps
+docker images
+cat /opt/testapp/docker-compose.yml
+curl http://localhost:8082
+
+--------------------------------------------------------
+
+7. Apache web app:
+- Сервер = HQ-SRV.
+- Web server = Apache.
+- DB = MariaDB.
+- Database = webdb.
+- User = web2.
+- Password = P@ssw0rd.
+- Files = index.php + images.
+- Dump = dump.sql.
+
+Команды/скрины:
+systemctl status apache2
+systemctl status mariadb
+mysql -u root -e "USE webdb; SHOW TABLES;"
+curl http://localhost
+
+--------------------------------------------------------
+
+8. Static NAT:
+- HQ-RTR 8082 -> HQ-SRV web.
+- HQ-RTR 2012 -> HQ-SRV ssh.
+- BR-RTR 8082 -> BR-SRV docker app.
+- BR-RTR 2026 -> BR-SRV ssh.
+
+Команды/скрины:
+iptables -t nat -L -n -v
+
+--------------------------------------------------------
+
+9. Nginx reverse proxy:
+- ISP = nginx proxy.
+- web.au-team.irpo -> HQ-SRV web app.
+- docker.au-team.irpo -> BR-SRV docker app.
+
+Команды/скрины:
+nginx -t
+cat /etc/nginx/conf.d/reverse.conf
+curl -H "Host: web.au-team.irpo" http://127.0.0.1
+curl -H "Host: docker.au-team.irpo" http://127.0.0.1
+
+--------------------------------------------------------
+
+10. Web auth:
+- Site = web.au-team.irpo.
+- Login = Kozma.
+- Password = P@ssw0rd.
+- File = /etc/nginx/.htpasswd.
+
+Команды/скрины:
+cat /etc/nginx/.htpasswd
+curl -I http://web.au-team.irpo
+curl -u Kozma:'P@ssw0rd' http://web.au-team.irpo
+
+--------------------------------------------------------
+
+11. Яндекс Браузер:
+- Установлен на HQ-CLI.
+- Проверка версии.
+- Открытие web.au-team.irpo и docker.au-team.irpo.
+
+Команды/скрины:
+yandex-browser --version
+
+--------------------------------------------------------
+14. БЫСТРЫЙ ПОРЯДОК ВЫПОЛНЕНИЯ
+--------------------------------------------------------
+
+1. BR-SRV Samba DC.
+2. HQ-CLI ввести в домен.
+3. hquser1-hquser5 + группа hq.
+4. sudo только cat/grep/id.
+5. HQ-SRV RAID5 md2.
+6. HQ-SRV NFS /raid/nfs.
+7. HQ-CLI automount /mnt/nfs.
+8. ISP chrony stratum 7.
+9. Клиенты chrony на ISP.
+10. BR-SRV ansible.
+11. BR-SRV docker app.
+12. HQ-SRV Apache + MariaDB app.
+13. HQ-RTR/BR-RTR static NAT.
+14. ISP nginx reverse proxy.
+15. ISP basic auth для web.au-team.irpo.
+16. HQ-CLI Yandex Browser.
+17. Финальные проверки.
+18. Отчёт.
+
+--------------------------------------------------------
+15. ЧАСТЫЕ ОШИБКИ
+--------------------------------------------------------
+
+ОШИБКА:
+realm join не видит домен.
+
+ПРОВЕРИТЬ:
+cat /etc/resolv.conf
+host -t SRV _ldap._tcp.au-team.irpo
+ping br-srv.au-team.irpo
+
+--------------------------------------------------------
+
+ОШИБКА:
+kinit не работает.
+
+ПРОВЕРИТЬ:
+cat /etc/krb5.conf
+date
+timedatectl
+systemctl status samba
+
+--------------------------------------------------------
+
+ОШИБКА:
+Ansible не даёт pong.
+
+ПРОВЕРИТЬ:
+ssh вручную до узла
+порт SSH
+пользователь
+sudo без пароля
+ANSIBLE_HOST_KEY_CHECKING=False
+
+--------------------------------------------------------
+
+ОШИБКА:
+NFS не монтируется.
+
+ПРОВЕРИТЬ:
+exportfs -v
+showmount -e hq-srv.au-team.irpo
+systemctl status nfs-server
+firewall/iptables
+сеть 192.168.212.0/27 в /etc/exports
+
+--------------------------------------------------------
+
+ОШИБКА:
+Docker site не открывается.
+
+ПРОВЕРИТЬ:
+docker ps
+docker logs site
+docker logs db
+ss -tulpn | grep 8082
+ports в docker-compose.yml
+
+--------------------------------------------------------
+
+ОШИБКА:
+Nginx proxy не открывает сайт.
+
+ПРОВЕРИТЬ:
+nginx -t
+systemctl status nginx
+proxy_pass
+curl IP_HQ_RTR:8082
+curl IP_BR_RTR:8082
+DNS web/docker
+
+--------------------------------------------------------
+
+ОШИБКА:
+web.au-team.irpo не просит пароль.
+
+ПРОВЕРИТЬ:
+auth_basic в server web.au-team.irpo
+auth_basic_user_file /etc/nginx/.htpasswd
+nginx -t
+systemctl restart nginx
+
+--------------------------------------------------------
+
+ОШИБКА:
+RAID пропал после перезагрузки.
+
+ПРОВЕРИТЬ:
+cat /etc/mdadm.conf
+cat /etc/mdadm/mdadm.conf
+cat /proc/mdstat
+cat /etc/fstab
+blkid
+
+--------------------------------------------------------
+КОНЕЦ МОДУЛЯ 2
+--------------------------------------------------------
